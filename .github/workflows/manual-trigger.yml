@@ -1,0 +1,91 @@
+name: Manual trigger for ECS deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      ECR_REPOSITORY:
+        description: 'Repository'     
+        required: true
+      ECS_CLUSTER:
+        description: 'Cluster'
+        required: true
+      ECS_TASK_DEFINITION:
+        description: 'Task'
+        required: true
+      S3_BUCKET:
+        description: 'Bucket'
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Environment
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=${{ github.event.inputs.ECR_REPOSITORY }}" >> $GITHUB_ENV
+          echo "ECS_SERVICE=drug-search" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=${{ github.event.inputs.ECS_CLUSTER }}" >> $GITHUB_ENV
+          echo "ECS_TASK_DEFINITION=${{ github.event.inputs.ECS_TASK_DEFINITION }}" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=drug-search" >> $GITHUB_ENV
+          echo "S3_BUCKET=${{ github.event.inputs.S3_BUCKET }}" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@13d241b293754004c80624b5567555c4a39ffbe3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@aaf69d68aa3fb14c1d5a6be9ac61fe15b48453a2
+
+      - name: Download search data files from s3
+        uses: keithweaver/aws-s3-github-action@v1.0.0
+        with:
+          command: cp
+          source: ${{ env.S3_BUCKET }}
+          destination: ./
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      - name: Unzip the data files
+        uses: montudor/action-zip@v1
+        with:
+          args: unzip ./drug-search-data.zip -d ./data
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build a docker container and
+          # push it to ECR so that it can
+          # be deployed to ECS.
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@97587c9d45a4930bf0e3da8dd2feb2a463cf4a3a
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@de0132cf8cdedb79975c6d42b77eb7ea193cf28e
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true

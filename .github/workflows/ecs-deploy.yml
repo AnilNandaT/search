@@ -1,0 +1,229 @@
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Deploy to Amazon ECS
+
+on:  
+  push:
+    branches:
+      - dev
+      - stage
+      - main
+    paths-ignore:
+      - lambda_function.py
+
+jobs:
+  build:
+    name: Build Image
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      # - name: Maximize build space
+      #   uses: easimon/maximize-build-space@master
+      #   with:
+      #     root-reserve-mb: 46080
+      #     swap-size-mb: 512
+      #     remove-dotnet: 'true'
+      #     remove-android: 'true'
+      #     remove-haskell: 'true'
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+#       - name: Run sonar scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+#       # If you wish to fail your job when the Quality Gate is red, uncomment the
+#       # following lines. This would typically be used to fail a deployment.
+#       - name: Sonar quality gate action
+#         uses: sonarsource/sonarqube-quality-gate-action@master
+#         timeout-minutes: 5
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Set up Dev environment
+        if: endsWith(github.ref, '/dev')
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=prepaire-dev-drug-search" >> $GITHUB_ENV
+          echo "ECS_SERVICE=drug-search" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=prepaire-dev-ecs" >> $GITHUB_ENV
+          echo "ECS_TASK_DEFINITION=.aws/dev-drug-search-task-definition.json" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=drug-search" >> $GITHUB_ENV
+          echo "S3_BUCKET=s3://prepaire-dev-drug-search-data/dev/drug-search-data.zip" >> $GITHUB_ENV
+
+      - name: Set up Stage environment
+        if: endsWith(github.ref, '/stage') 
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=prepaire-stage-searchengine" >> $GITHUB_ENV
+          echo "ECS_SERVICE=searchengine" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=prepaire-stage-ecs" >> $GITHUB_ENV
+          echo "ECS_TASK_DEFINITION=.aws/stage-searchengine-task-definition.json" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=searchengine" >> $GITHUB_ENV
+          echo "S3_BUCKET=s3://prepaire-dev-drug-search-data/stage/drug-search-data.zip" >> $GITHUB_ENV
+
+      - name: Set up Prod environment
+        if: endsWith(github.ref, '/main') 
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=prepaire-drug-search" >> $GITHUB_ENV
+          echo "ECS_SERVICE=drug-search" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=prepaire" >> $GITHUB_ENV
+          echo "ECS_TASK_DEFINITION=.aws/prod-drug-search-task-definition.json" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=drug-search" >> $GITHUB_ENV
+          echo "S3_BUCKET=s3://prepaire-dev-drug-search-data/prod/drug-search-data.zip" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@13d241b293754004c80624b5567555c4a39ffbe3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: 'no'
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@aaf69d68aa3fb14c1d5a6be9ac61fe15b48453a2
+
+      - name: Download search data files from s3
+        uses: keithweaver/aws-s3-github-action@v1.0.0
+        with:
+          command: cp
+          source: ${{ env.S3_BUCKET }}
+          destination: ./
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      - name: Unzip the data files
+        uses: montudor/action-zip@v1
+        with:
+          args: unzip ./drug-search-data.zip -d ./data
+
+      - name: Remove File
+        uses: JesseTG/rm@v1.0.2
+        with:
+          path: ./drug-search-data.zip
+
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build a docker container and
+          # push it to ECR so that it can
+          # be deployed to ECS.
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      # - name: Run Trivy vulnerability scanner
+      #   uses: aquasecurity/trivy-action@master
+      #   with:
+      #     image-ref: ${{ steps.build-image.outputs.image }}
+      #     format: 'table'
+      #     exit-code: '1'
+      #     ignore-unfixed: true
+      #     vuln-type: 'os,library'
+      #     severity: 'CRITICAL'
+      #     timeout: 20m0s
+      #     skip-dirs: '/src/data/'
+
+      - name: Push image to Amazon ECR
+        id: push-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Microsoft Teams Notification
+        uses: skitionek/notify-microsoft-teams@master
+        if: always()
+        with:
+          webhook_url: ${{ secrets.TEAMS_WEBHOOK }}
+          needs: ${{ toJson(needs) }}
+          job: ${{ toJson(job) }}
+          steps: ${{ toJson(steps) }}
+
+  deploy:
+    name: Deploy Image
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        
+      - name: Set up Dev environment
+        if: endsWith(github.ref, '/dev')
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=prepaire-dev-drug-search" >> $GITHUB_ENV
+          echo "ECS_SERVICE=drug-search" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=prepaire-dev-ecs" >> $GITHUB_ENV
+          echo "ECS_TASK_DEFINITION=.aws/dev-drug-search-task-definition.json" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=drug-search" >> $GITHUB_ENV
+          echo "S3_BUCKET=s3://prepaire-dev-drug-search-data/dev/drug-search-data.zip" >> $GITHUB_ENV
+
+      - name: Set up Stage environment
+        if: endsWith(github.ref, '/stage') 
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=prepaire-stage-searchengine" >> $GITHUB_ENV
+          echo "ECS_SERVICE=searchengine" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=prepaire-stage-ecs" >> $GITHUB_ENV
+          echo "ECS_TASK_DEFINITION=.aws/stage-searchengine-task-definition.json" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=searchengine" >> $GITHUB_ENV
+          echo "S3_BUCKET=s3://prepaire-dev-drug-search-data/stage/drug-search-data.zip" >> $GITHUB_ENV
+
+      - name: Set up Prod environment
+        if: endsWith(github.ref, '/main') 
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=prepaire-drug-search" >> $GITHUB_ENV
+          echo "ECS_SERVICE=drug-search" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=prepaire" >> $GITHUB_ENV
+          echo "ECS_TASK_DEFINITION=.aws/prod-drug-search-task-definition.json" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=drug-search" >> $GITHUB_ENV
+          echo "S3_BUCKET=s3://prepaire-dev-drug-search-data/prod/drug-search-data.zip" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@13d241b293754004c80624b5567555c4a39ffbe3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: update-task-definition
+        uses: aws-actions/amazon-ecs-render-task-definition@97587c9d45a4930bf0e3da8dd2feb2a463cf4a3a
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build.outputs.images }}
+
+      - name: Deploy Amazon ECS task definition
+        id: deploy-image
+        uses: aws-actions/amazon-ecs-deploy-task-definition@de0132cf8cdedb79975c6d42b77eb7ea193cf28e
+        with:
+          task-definition: ${{ steps.update-task-definition.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Microsoft Teams Notification
+        uses: skitionek/notify-microsoft-teams@master
+        if: always()
+        with:
+          webhook_url: ${{ secrets.TEAMS_WEBHOOK }}
+          needs: ${{ toJson(needs) }}
+          job: ${{ toJson(job) }}
+          steps: ${{ toJson(steps) }}

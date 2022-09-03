@@ -1,0 +1,57 @@
+name: Deploy Lambda function
+
+on:
+  push:
+    branches:
+      - dev
+      - stage
+      - main
+    paths:
+      - lambda_function.py
+
+jobs:
+  lambdadeploy:
+    name: Lambda Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Dev environment
+        if: endsWith(github.ref, '/dev')
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "FUNCTION=prepaire-dev-drug-search" >> $GITHUB_ENV
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+
+      - name: Set up Stage environment
+        if: endsWith(github.ref, '/stage')
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "FUNCTION=prepaire-stage-drug-search" >> $GITHUB_ENV
+          echo "ENVIRONMENT=stage" >> $GITHUB_ENV
+
+      - name: Set up Prod environment
+        if: endsWith(github.ref, '/main')
+        run: |
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "FUNCTION=prepaire-prod-drug-search" >> $GITHUB_ENV
+          echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+
+      - uses: vimtor/action-zip@v1
+        with:
+          files: lambda_function.py
+          dest: drug-search-latest.zip
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@13d241b293754004c80624b5567555c4a39ffbe3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload to S3 bucket
+        run: |
+          aws s3 cp drug-search-latest.zip s3://prepaire-${{env.ENVIRONMENT}}-lambda-artifact-us/latest/
+          aws lambda update-function-code --function-name ${{ env.FUNCTION }} --s3-bucket prepaire-${{env.ENVIRONMENT}}-lambda-artifact-us --s3-key latest/drug-search-latest.zip
